@@ -1,0 +1,133 @@
+name: Compile FAP — FoxFW2.0 (fallback, full fbt build)
+
+# FALLBACK ONLY — not active. This is the original full-firmware-build
+# workflow, kept here in case the ufbt SDK-index path (the live compile.yml)
+# ever needs to be reverted, e.g. if https://foxfw.github.io/fox-web/directory.json
+# goes stale or unreachable.
+#
+# It checks out the real FoxFW2.0 source fresh on every run, drops the
+# requested app into applications_user/, and builds it with fbt (FoxFW's own
+# build tool, same one used to build the firmware). No published SDK index
+# required — much slower than the ufbt path, but has no external dependency
+# beyond the FoxFW2.0 repo itself.
+#
+# To reactivate: rename the current compile.yml to compile-fast.yml.example
+# (or delete it), then rename this file to compile.yml. No changes needed on
+# the fap-compiler.html or worker/index.js side — same inputs, same
+# artifact-name convention.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: "GitHub repo URL of the app to compile (e.g. https://github.com/someone/their-flipper-app)"
+        required: true
+      ref:
+        description: "Branch / tag / commit of the app repo (blank = default branch)"
+        required: false
+        default: ""
+      subdir:
+        description: "Path inside the app repo to the folder containing application.fam (blank = repo root)"
+        required: false
+        default: ""
+
+env:
+  FOXFW_REPO: foxfw/2.0
+  FOXFW_REF: master
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Parse target repo owner/name
+        id: parse
+        run: |
+          set -e
+          URL="${{ inputs.repo_url }}"
+          URL="${URL%.git}"
+          URL="${URL%/}"
+          OWNER_REPO="$(echo "$URL" | sed -E 's#^(https?://)?(www\.)?github\.com/##')"
+          if [[ ! "$OWNER_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::Could not parse a github.com owner/repo out of '${{ inputs.repo_url }}'. Paste a normal GitHub repo URL, e.g. https://github.com/owner/repo"
+            exit 1
+          fi
+          echo "owner_repo=$OWNER_REPO" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout FoxFW2.0 firmware
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FOXFW_REPO }}
+          ref: ${{ env.FOXFW_REF }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Checkout target app
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.parse.outputs.owner_repo }}
+          ref: ${{ inputs.ref }}
+          path: _appsrc
+          fetch-depth: 1
+
+      - name: Cache FoxFW toolchain
+        uses: actions/cache@v4
+        with:
+          path: toolchain
+          key: foxfw-toolchain-${{ runner.os }}-v39
+
+      - name: Locate application.fam and appid
+        id: app
+        run: |
+          set -e
+          SEARCH_DIR="_appsrc/${{ inputs.subdir }}"
+          SEARCH_DIR="${SEARCH_DIR%/}"
+          FAM_FILE="$SEARCH_DIR/application.fam"
+          if [ ! -f "$FAM_FILE" ]; then
+            echo "::error::No application.fam at $FAM_FILE. Multi-app repo? Set the 'subdir' input to the folder that contains the app you want."
+            exit 1
+          fi
+          APPID="$(grep -oE 'appid[[:space:]]*=[[:space:]]*"[^"]+"' "$FAM_FILE" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ -z "$APPID" ]; then
+            echo "::error::Could not read appid= from $FAM_FILE"
+            exit 1
+          fi
+          echo "Found app '$APPID' at $FAM_FILE"
+          echo "appid=$APPID" >> "$GITHUB_OUTPUT"
+          echo "src_dir=$SEARCH_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Drop app into applications_user/
+        run: |
+          set -e
+          rm -rf "applications_user/${{ steps.app.outputs.appid }}"
+          cp -r "${{ steps.app.outputs.src_dir }}" "applications_user/${{ steps.app.outputs.appid }}"
+
+      - name: Build FAP with fbt
+        run: |
+          set -e
+          ./fbt fap_${{ steps.app.outputs.appid }}
+
+      - name: Collect output .fap
+        id: out
+        run: |
+          set -e
+          FAP="$(find build -type f -name '*.fap' -ipath "*${{ steps.app.outputs.appid }}*" | head -1)"
+          if [ -z "$FAP" ]; then
+            FAP="$(find build -type f -name '*.fap' | head -1)"
+          fi
+          if [ -z "$FAP" ]; then
+            echo "::error::Build finished but no .fap file was produced — check the build log above."
+            exit 1
+          fi
+          mkdir -p out
+          OUT_NAME="${{ steps.app.outputs.appid }}-foxfw2.0.fap"
+          cp "$FAP" "out/$OUT_NAME"
+          echo "Built: $OUT_NAME ($(du -h "out/$OUT_NAME" | cut -f1))"
+          echo "fap_path=out/$OUT_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload .fap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.app.outputs.appid }}-foxfw2.0-fap
+          path: ${{ steps.out.outputs.fap_path }}
+          retention-days: 7
