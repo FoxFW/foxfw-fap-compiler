@@ -1,0 +1,92 @@
+name: Compile FAP — FoxFW2.0 (fast, ufbt-based)
+
+# Faster alternative to compile.yml — uses the flipperdevices/flipperzero-ufbt-action
+# against FoxFW2.0's own published SDK index instead of checking out and
+# building the whole firmware from source on every compile.
+#
+# DO NOT rename this to compile.yml until you've confirmed the index is live:
+#   curl -sf https://foxfw.github.io/fox-web/directory.json | python3 -m json.tool | head -30
+# should print real channels/versions/files, with at least one "type": "sdk_zip"
+# entry for "target": "f7". That index is produced by FoxFW2.0's own
+# .github/workflows/publish-sdk-index.yml (run it at least once first).
+#
+# Once confirmed:
+#   mv compile-fast.yml.example compile.yml   (replacing the fbt-based one)
+# No changes are needed on the fap-compiler.html side — same inputs, same
+# artifact-name convention, same everything from the page's point of view.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: "GitHub repo URL of the app to compile"
+        required: true
+      ref:
+        description: "Branch / tag / commit of the app repo (blank = default branch)"
+        required: false
+        default: ""
+      subdir:
+        description: "Path inside the app repo to the folder containing application.fam (blank = repo root)"
+        required: false
+        default: ""
+
+env:
+  FOXFW_SDK_INDEX_URL: https://foxfw.github.io/fox-web/directory.json
+  FOXFW_SDK_CHANNEL: release
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Parse target repo owner/name
+        id: parse
+        run: |
+          set -e
+          URL="${{ inputs.repo_url }}"
+          URL="${URL%.git}"
+          URL="${URL%/}"
+          OWNER_REPO="$(echo "$URL" | sed -E 's#^(https?://)?(www\.)?github\.com/##')"
+          if [[ ! "$OWNER_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::Could not parse a github.com owner/repo out of '${{ inputs.repo_url }}'."
+            exit 1
+          fi
+          echo "owner_repo=$OWNER_REPO" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout target app
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.parse.outputs.owner_repo }}
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+
+      - name: Resolve app subdirectory + appid
+        id: app
+        run: |
+          set -e
+          APP_DIR="${{ inputs.subdir }}"
+          APP_DIR="${APP_DIR%/}"
+          [ -z "$APP_DIR" ] && APP_DIR="."
+          FAM_FILE="$APP_DIR/application.fam"
+          if [ ! -f "$FAM_FILE" ]; then
+            echo "::error::No application.fam at $FAM_FILE. Multi-app repo? Set the 'subdir' input."
+            exit 1
+          fi
+          APPID="$(grep -oE 'appid[[:space:]]*=[[:space:]]*"[^"]+"' "$FAM_FILE" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "app_dir=$APP_DIR" >> "$GITHUB_OUTPUT"
+          echo "appid=$APPID" >> "$GITHUB_OUTPUT"
+
+      - name: Build with ufbt against FoxFW2.0 SDK
+        id: build
+        uses: flipperdevices/flipperzero-ufbt-action@v0.1
+        with:
+          app-dir: ${{ steps.app.outputs.app_dir }}
+          sdk-channel: ${{ env.FOXFW_SDK_CHANNEL }}
+          sdk-index-url: ${{ env.FOXFW_SDK_INDEX_URL }}
+
+      - name: Upload .fap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.app.outputs.appid }}-foxfw2.0-fap
+          path: ${{ steps.build.outputs.fap-artifacts }}
+          retention-days: 7
