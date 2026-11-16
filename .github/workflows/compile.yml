@@ -79,7 +79,7 @@ jobs:
           echo "app_dir=$APP_DIR" >> "$GITHUB_OUTPUT"
           echo "appid=$APPID" >> "$GITHUB_OUTPUT"
 
-      - name: Build with ufbt against FoxFW2.0 SDK
+      - name: Build with ufbt against FoxFW v2.1 SDK
         id: build
         uses: flipperdevices/flipperzero-ufbt-action@v0.1
         with:
